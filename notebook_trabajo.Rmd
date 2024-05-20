@@ -21,6 +21,9 @@ ruta_pacientes <- file.path(base_path, "pacientes.xlsx")
 # Leer datos con selección de columnas específicas si es necesario
 datos_eventos <- read_excel(ruta_eventos)
 datos_pacientes <- read_excel(ruta_pacientes)
+
+eventos_con_edad <- datos_eventos %>%
+  left_join(datos_pacientes %>% select(Paciente, Edad, Sexo), by = "Paciente")
 ```
 
 ```{r}
@@ -50,11 +53,16 @@ cohorte <- datos_pacientes %>%
 
 ```{r}
 # Diagrama de dispersión para cohorte de pacientes
-ggplot(cohorte, aes(x = Edad, y = num_pacientes, color = Sexo)) +
-  geom_point() +
-  labs(x = "Edad", y = "Número de Pacientes", title = "Número de Pacientes por Género y Edad") +
-  theme_minimal()
+ggplot(cohorte, aes(x = Edad, y = Sexo, size = num_pacientes, color = Sexo)) +
+  geom_point(alpha = 0.7) +
+  scale_size_continuous(range = c(3, 15)) + # Ajusta el rango del tamaño de los puntos
+  labs(x = "Edad", y = "Sexo", size = "Número de Pacientes",
+       title = "Número de Pacientes por Género y Edad") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
 ```
+
+hacer un bumble, taman;o de los puntos dinamico.
 
 EVENTOS DE SANGRADO
 
@@ -99,29 +107,40 @@ vamos a definir la UI de la parte 1.
 
 ```{r}
 library(shiny)
+library(shinythemes)
+```
 
+```{r}
 # Definir la interfaz de usuario
 ui <- fluidPage(
+  theme = shinytheme("cerulean"),
   titlePanel("Análisis Interactivo de Eventos en Pacientes"),
   sidebarLayout(
     sidebarPanel(
-      selectInput("tipoEvento", "Tipo de Evento", choices = unique(eventos_con_edad$`Tipo de sangrado`)),
-      selectInput("escalaGravedad", "Escala de Gravedad", choices = c("TIMI", "GUSTO", "BARC")),
-      selectInput("gravedadEvento", "Gravedad del Evento", choices = NULL),  # Las opciones se actualizarán dinámicamente
-      sliderInput("edad", "Edad", min = min(eventos_con_edad$Edad, na.rm = TRUE), 
+      h3("Filtros de Evento"),
+      selectInput("tipoEvento", "Tipo de Evento:", choices = unique(eventos_con_edad$`Tipo de sangrado`)),
+      selectInput("escalaGravedad", "Escala de Gravedad:", choices = c("TIMI", "GUSTO", "BARC")),
+      selectInput("gravedadEvento", "Gravedad del Evento:", choices = NULL),
+      sliderInput("edad", "Edad:", 
+                  min = min(eventos_con_edad$Edad, na.rm = TRUE), 
                   max = max(eventos_con_edad$Edad, na.rm = TRUE), 
                   value = c(min(eventos_con_edad$Edad, na.rm = TRUE), max(eventos_con_edad$Edad, na.rm = TRUE))),
-      selectInput("genero", "Género", choices = unique(datos_pacientes$Sexo))
+      selectInput("genero", "Género:", choices = unique(datos_pacientes$Sexo)),
+      actionButton("applyFilters", "Aplicar Filtros")
     ),
     mainPanel(
-      plotOutput("plotEventos", width = "100%")
+      tabsetPanel(
+        tabPanel("Gráfico", plotOutput("plotEventos", width = "100%")),
+        tabPanel("Tabla de Datos Filtrados", tableOutput("filteredData"))
+      )
     )
   )
 )
 
+# Definir el servidor
 server <- function(input, output, session) {
   # Actualizar dinámicamente las opciones de gravedad basadas en la escala seleccionada
-  observe({
+  observeEvent(input$escalaGravedad, {
     escala <- switch(input$escalaGravedad,
                      "TIMI" = "Gravedad de la hemorragia (TIMI)",
                      "GUSTO" = "Gravedad de la hemorragia (GUSTO)",
@@ -130,23 +149,31 @@ server <- function(input, output, session) {
     updateSelectInput(session, "gravedadEvento", 
                       choices = unique(eventos_con_edad[[escala]]))
   })
-
-  # Renderizar el gráfico basado en los filtros aplicados
-  output$plotEventos <- renderPlot({
-    if (is.null(input$gravedadEvento)) {
-      return()
-    }
-
-    datos_filtrados <- eventos_con_edad %>%
+  
+  # Filtrar datos basados en los inputs del usuario
+  filteredData <- reactive({
+    req(input$gravedadEvento)
+    
+    escala <- switch(input$escalaGravedad,
+                     "TIMI" = "Gravedad de la hemorragia (TIMI)",
+                     "GUSTO" = "Gravedad de la hemorragia (GUSTO)",
+                     "BARC" = "Gravedad de la hemorragia (BARC)")
+    
+    eventos_con_edad %>%
       filter(`Tipo de sangrado` == input$tipoEvento,
-             get(paste0("Gravedad de la hemorragia (", input$escalaGravedad, ")")) == input$gravedadEvento,
+             .data[[escala]] == input$gravedadEvento,
              Edad >= input$edad[1], Edad <= input$edad[2],
              Sexo == input$genero)
-
+  })
+  
+  # Renderizar el gráfico basado en los filtros aplicados
+  output$plotEventos <- renderPlot({
+    datos_filtrados <- filteredData()
+    
     if (nrow(datos_filtrados) == 0) {
       return(NULL)
     }
-
+    
     ggplot(datos_filtrados, aes(x = Edad, fill = `Tipo de sangrado`)) +
       geom_histogram(binwidth = 1) +
       labs(title = paste("Distribución de Eventos por Edad y Tipo usando escala", input$escalaGravedad),
@@ -155,6 +182,11 @@ server <- function(input, output, session) {
       theme(plot.title = element_text(hjust = 0.5),
             axis.title.x = element_text(hjust = 0.5),
             axis.title.y = element_text(hjust = 0.5))
+  })
+  
+  # Mostrar datos filtrados en una tabla
+  output$filteredData <- renderTable({
+    filteredData()
   })
 }
 
@@ -165,23 +197,29 @@ shinyApp(ui = ui, server = server)
 Paso 4: visualizaciones interactivas selección de datos.
 
 ```{r}
+library(DT)
 colnames(eventos_con_edad)
 ```
 
 ```{r}
+# Definir la interfaz de usuario
 ui <- fluidPage(
+  theme = shinytheme("cerulean"),
   titlePanel("Selección Interactiva en Diagrama de Dispersión"),
   sidebarLayout(
     sidebarPanel(
-      helpText("Haga clic en los puntos en el gráfico para ver más detalles."),
+      helpText("Haga clic y arrastre para seleccionar puntos en el gráfico."),
       verbatimTextOutput("info_selected")
     ),
     mainPanel(
-      plotOutput("scatterPlot", click = "plot_click", brush = "plot_brush", height = "500px")
+      plotOutput("scatterPlot", click = "plot_click", brush = "plot_brush", height = "500px"),
+      br(),
+      DT::dataTableOutput("selectedData")
     )
   )
 )
 
+# Definir el servidor
 server <- function(input, output) {
   output$scatterPlot <- renderPlot({
     ggplot(eventos_con_edad, aes(x = Edad, y = Sexo, color = Sexo)) +
@@ -203,28 +241,184 @@ server <- function(input, output) {
       if (nrow(selected) == 0) {
         "No hay puntos seleccionados"
       } else {
-        # Usar lapply para aplicar una función a cada fila
-        details <- lapply(1:nrow(selected), function(i) {
-          paste(
-            "Paciente:", selected[i, "Paciente"], "\n",
-            "Sexo:", selected[i, "Sexo"], "\n",
-            "Edad:", selected[i, "Edad"], "\n",
-            "Tipo de sangrado:", selected[i, "Tipo de sangrado"], "\n",
-            "Gravedad TIMI:", selected[i, "Gravedad de la hemorragia (TIMI)"], "\n",
-            "Gravedad GUSTO:", selected[i, "Gravedad de la hemorragia (GUSTO)"], "\n",
-            "Gravedad BARC:", selected[i, "Gravedad de la hemorragia (BARC)"], "\n",
-            "Descenso hemoglobina:", selected[i, "Descenso de hemoglobina"], "\n",
-            "Procedimientos terapéuticos", selected[i, "Procedimientos terapéuticos"], "\n"
-          )
-        })
-        # Concatenar todos los detalles en un solo texto
-        paste(unlist(details), collapse = "\n")
+        details <- paste(
+          "Número de puntos seleccionados: ", nrow(selected), "\n",
+          "Pacientes seleccionados: ", paste(selected$Paciente, collapse = ", ")
+        )
+        details
       }
     } else {
       "Haga clic y arrastre para seleccionar puntos en el gráfico."
     }
   })
+
+  output$selectedData <- DT::renderDataTable({
+    brush <- input$plot_brush
+    if (!is.null(brush)) {
+      selected <- brushedPoints(eventos_con_edad, brush)
+      selected
+    }
+  }, options = list(pageLength = 5))
 }
+
 
 shinyApp(ui = ui, server = server)
 ```
+
+Une las los uis
+
+```{r}
+library(shiny)
+library(shinythemes)
+library(DT)
+library(ggplot2)
+library(dplyr)
+
+# Supongamos que los datos están en las variables eventos_con_edad y datos_pacientes
+
+# Definir la interfaz de usuario
+ui <- fluidPage(
+  theme = shinytheme("cerulean"),
+  titlePanel("Análisis Interactivo de Eventos en Pacientes"),
+  tags$head(
+    tags$style(HTML("
+      .sidebar { width: 900px; }  /* Ajusta el ancho de la barra lateral */
+      .main { margin-left: 200px; }  /* Ajusta el margen izquierdo del panel principal */
+    "))
+  ),
+  div(class = "sidebar",
+      sidebarPanel(
+        conditionalPanel(
+          condition = "input.tabs == 'histogram' || input.tabs == 'filteredData'",
+          h3("Filtros de Evento"),
+          selectInput("tipoEvento", "Tipo de Evento:", choices = unique(eventos_con_edad$`Tipo de sangrado`)),
+          selectInput("escalaGravedad", "Escala de Gravedad:", choices = c("TIMI", "GUSTO", "BARC")),
+          selectInput("gravedadEvento", "Gravedad del Evento:", choices = NULL),
+          sliderInput("edad", "Edad:", 
+                      min = min(eventos_con_edad$Edad, na.rm = TRUE), 
+                      max = max(eventos_con_edad$Edad, na.rm = TRUE), 
+                      value = c(min(eventos_con_edad$Edad, na.rm = TRUE), max(eventos_con_edad$Edad, na.rm = TRUE))),
+          selectInput("genero", "Género:", choices = unique(datos_pacientes$Sexo)),
+          actionButton("applyFilters", "Aplicar Filtros")
+        )
+      )
+  ),
+  div(class = "main",
+      mainPanel(
+        tabsetPanel(
+          id = "tabs",
+          tabPanel("Gráfico de Histogramas", value = "histogram", 
+                   plotOutput("plotEventos", width = "100%")),
+          tabPanel("Tabla de Datos Filtrados", value = "filteredData", 
+                   tableOutput("filteredData")),
+          tabPanel("Diagrama de Dispersión", value = "scatter",
+                   plotOutput("scatterPlot", click = "plot_click", brush = "plot_brush", height = "500px")),
+          tabPanel("Información Seleccionada", value = "info", 
+                   verbatimTextOutput("info_selected"),
+                   DT::dataTableOutput("selectedData"))
+        )
+      )
+  )
+)
+
+# Definir el servidor
+server <- function(input, output, session) {
+  # Actualizar dinámicamente las opciones de gravedad basadas en la escala seleccionada
+  observeEvent(input$escalaGravedad, {
+    escala <- switch(input$escalaGravedad,
+                     "TIMI" = "Gravedad de la hemorragia (TIMI)",
+                     "GUSTO" = "Gravedad de la hemorragia (GUSTO)",
+                     "BARC" = "Gravedad de la hemorragia (BARC)")
+    
+    updateSelectInput(session, "gravedadEvento", 
+                      choices = unique(eventos_con_edad[[escala]]))
+  })
+  
+  # Filtrar datos basados en los inputs del usuario
+  filteredData <- reactive({
+    req(input$gravedadEvento)
+    
+    escala <- switch(input$escalaGravedad,
+                     "TIMI" = "Gravedad de la hemorragia (TIMI)",
+                     "GUSTO" = "Gravedad de la hemorragia (GUSTO)",
+                     "BARC" = "Gravedad de la hemorragia (BARC)")
+    
+    eventos_con_edad %>%
+      filter(`Tipo de sangrado` == input$tipoEvento,
+             .data[[escala]] == input$gravedadEvento,
+             Edad >= input$edad[1], Edad <= input$edad[2],
+             Sexo == input$genero)
+  })
+  
+  # Renderizar el gráfico basado en los filtros aplicados
+  output$plotEventos <- renderPlot({
+    datos_filtrados <- filteredData()
+    
+    if (nrow(datos_filtrados) == 0) {
+      return(NULL)
+    }
+    
+    ggplot(datos_filtrados, aes(x = Edad, fill = `Tipo de sangrado`)) +
+      geom_histogram(binwidth = 1) +
+      labs(title = paste("Distribución de Eventos por Edad y Tipo usando escala", input$escalaGravedad),
+           x = "Edad", y = "Frecuencia") +
+      theme_minimal() +
+      theme(plot.title = element_text(hjust = 0.5),
+            axis.title.x = element_text(hjust = 0.5),
+            axis.title.y = element_text(hjust = 0.5))
+  })
+  
+  # Mostrar datos filtrados en una tabla
+  output$filteredData <- renderTable({
+    filteredData() %>%
+      select(Paciente, `Caracterización de la hemorragia`, `Gravedad de la hemorragia (TIMI)`, `Gravedad de la hemorragia (GUSTO)`, 
+             `Gravedad de la hemorragia (BARC)`, `Tipo de sangrado`, Edad, Sexo)
+  })
+  
+  # Renderizar el diagrama de dispersión
+  output$scatterPlot <- renderPlot({
+    ggplot(eventos_con_edad, aes(x = Edad, y = Sexo, color = Sexo)) +
+      geom_point(alpha = 0.7, size = 5) + # Ajusta el tamaño de los puntos
+      labs(x = "Edad", y = "Sexo", size = "Número de Pacientes",
+           title = "Número de Pacientes por Género y Edad") +
+      theme_minimal() +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  })
+  
+  output$info_selected <- renderText({
+    brush <- input$plot_brush
+    if (!is.null(brush)) {
+      selected <- brushedPoints(eventos_con_edad, brush)
+      if (nrow(selected) == 0) {
+        "No hay puntos seleccionados"
+      } else {
+        details <- paste(
+          "Número de puntos seleccionados: ", nrow(selected), "\n",
+          "Pacientes seleccionados: ", paste(selected$Paciente, collapse = ", ")
+        )
+        details
+      }
+    } else {
+      "Haga clic y arrastre para seleccionar puntos en el gráfico."
+    }
+  })
+  
+  output$selectedData <- DT::renderDataTable({
+    brush <- input$plot_brush
+    if (!is.null(brush)) {
+      selected <- brushedPoints(eventos_con_edad, brush)
+      selected %>%
+        select(Paciente, `Caracterización de la hemorragia`, `Gravedad de la hemorragia (TIMI)`, `Gravedad de la hemorragia (GUSTO)`, 
+               `Gravedad de la hemorragia (BARC)`, Edad, Sexo, `Tipo de sangrado`)
+    }
+  }, options = list(pageLength = 5))
+}
+
+# Correr la aplicación
+shinyApp(ui = ui, server = server)
+
+
+
+```
+
+,
